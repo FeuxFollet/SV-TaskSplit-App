@@ -158,6 +158,7 @@ def default_data():
                  "tasks": [dict(t) for t in DEFAULT_TASKS]},
         "best": {},         # best segment time per task name
         "pos": None,        # overlay window position
+        "snapshot": None,   # run in progress (what the main menu's Continue loads)
     }
 
 
@@ -200,6 +201,20 @@ def save_data(d):
         os.replace(tmp, DATA_FILE)
     except Exception:
         pass
+
+
+def get_snapshot():
+    """The saved run in progress, or None if there isn't a usable one."""
+    s = load_data().get("snapshot")
+    try:
+        if (isinstance(s, dict) and isinstance(s.get("tasks"), list) and s["tasks"]
+                and all(isinstance(t, dict) and t.get("name") for t in s["tasks"])):
+            float(s.get("elapsed", 0))
+            [float(x) for x in s.get("splits", [])]
+            return s
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 # ---------------------------------------------------------------- themed widgets
@@ -684,7 +699,7 @@ class LibraryDialog:
 
 # ---------------------------------------------------------------- overlay
 class TaskSplit:
-    def __init__(self, title="Daily Tasks", subtitle="", tasks=None):
+    def __init__(self, title="Daily Tasks", subtitle="", tasks=None, snapshot=None):
         d = load_data()
         st = d["settings"]
         self.th = THEMES[st["theme"]]
@@ -699,6 +714,10 @@ class TaskSplit:
         self.tasks = [dict(t) for t in (DEFAULT_TASKS if tasks is None else tasks)]
         self.splits, self.golds = [], []
         self.acc, self.t0 = 0.0, None
+        self._cleared = False            # set by Reset: lets save() drop the snapshot
+        self._last_autosave = time.monotonic()
+        if snapshot:
+            self.restore(snapshot)
 
         self.q = queue.Queue()
         self.hover = None
@@ -741,13 +760,37 @@ class TaskSplit:
         self.tick()
 
     # ------------------------------------------------------------ state
+    def snapshot(self):
+        return {"title": self.title, "subtitle": self.subtitle,
+                "tasks": self.tasks, "splits": self.splits, "golds": self.golds,
+                "elapsed": self.elapsed(), "best_before": self._best_before,
+                "saved_at": datetime.datetime.now().isoformat(timespec="seconds")}
+
+    def restore(self, s):
+        """Load a snapshot. The clock comes back PAUSED at the saved time."""
+        self.title = s.get("title") or "Daily Tasks"
+        self.subtitle = s.get("subtitle") or ""
+        self.tasks = [dict(t) for t in s["tasks"]]
+        self.splits = [float(x) for x in s.get("splits", [])][:len(self.tasks)]
+        g = [bool(x) for x in s.get("golds", [])][:len(self.splits)]
+        self.golds = g + [False] * (len(self.splits) - len(g))
+        self.acc = max(float(s.get("elapsed", 0)), self.splits[-1] if self.splits else 0.0)
+        self.t0 = None
+        bb = s.get("best_before")
+        self._best_before = dict(bb) if isinstance(bb, dict) else None
+
     def save(self):
-        """Read-modify-write so we never clobber the library / settings."""
+        """Read-modify-write so we never clobber the library / settings.
+        Also keeps the 'Continue' snapshot up to date while a run is in progress."""
         try:
             d = load_data()
             d["best"] = self.best
             d["settings"]["opacity"] = self.opacity
             d["pos"] = [self.root.winfo_x(), self.root.winfo_y()]
+            if self.started:
+                d["snapshot"] = self.snapshot()
+            elif self._cleared:         # run was reset -> nothing to continue
+                d["snapshot"] = None
             save_data(d)
         except Exception:
             pass
@@ -821,6 +864,8 @@ class TaskSplit:
 
     def reset(self):
         self.splits, self.golds, self.acc, self.t0 = [], [], 0.0, None
+        self._best_before = None
+        self._cleared = True
         self.save()
 
     def apply_tasks(self, title, subtitle, tasks):
@@ -1176,10 +1221,14 @@ class TaskSplit:
         except queue.Empty:
             pass
         self.draw()
+        if self.running and time.monotonic() - self._last_autosave > 5:
+            self._last_autosave = time.monotonic()
+            self.save()                 # autosave so a crash can't lose the run
         self.root.after(50, self.tick)
 
     def quit(self):
-        """Close the overlay; mainmenu.py then shows the main menu again."""
+        """Close the overlay (run is saved as a snapshot); mainmenu.py then
+        shows the main menu again, where Continue picks it back up."""
         if not self._alive:
             return
         self._alive = False

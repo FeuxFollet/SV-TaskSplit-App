@@ -3,8 +3,9 @@
 TaskSplit - main menu.   Run this file:   python mainmenu.py
 
 Keep it in the same folder as tsv2.py.
+  Continue     -> pick up the run you left off (greyed out if there is none)
   Start New    -> task editor -> Start -> the speedrun overlay opens
-               (right-click the overlay -> "Quit to main menu" to come back)
+               (right-click the overlay -> "Quit to main menu" saves your run)
   Saved Tasks  -> your library of saved task sets (save from any task editor)
   Settings     -> overlay size + dark / light theme
   Quit         -> close the app
@@ -14,11 +15,11 @@ import tkinter as tk
 
 import tsv2 as ts
 
-W, H = 340, 420
+W, H = 340, 480
 HEADER = 80
 ROW = 58
-ITEMS = ("start", "library", "settings", "quit")
-LABELS = {"start": "Start New", "library": "Saved Tasks",
+ITEMS = ("continue", "start", "library", "settings", "quit")
+LABELS = {"continue": "Continue", "start": "Start New", "library": "Saved Tasks",
           "settings": "Settings", "quit": "Quit"}
 
 
@@ -62,6 +63,7 @@ class MainMenu:
         self.size = d["settings"]["size"]
         self.th = ts.THEMES[self.theme_name]
         self.lib_count = len(d["library"])
+        self.snap = ts.get_snapshot()       # None -> Continue is greyed out
 
     def apply_theme(self):
         self.root.configure(bg=self.th["bg"])
@@ -71,11 +73,25 @@ class MainMenu:
     def dialog_alive(self):
         return self._dialog is not None and self._dialog.alive()
 
+    def item_enabled(self, i):
+        return ITEMS[i] != "continue" or self.snap is not None
+
+    def snap_summary(self):
+        s = self.snap
+        n = len(s["tasks"])
+        done = min(len(s.get("splits", [])), n)
+        return f"{done}/{n}  \u2022  {ts.fmt(float(s.get('elapsed', 0)))}"
+
     def act(self, name):
         if self.dialog_alive():
             self._dialog.focus()
             return
-        if name == "start":
+        if name == "continue":
+            snap = ts.get_snapshot()
+            if snap:
+                self.result = {"snapshot": snap}
+                self.root.quit()
+        elif name == "start":
             self.open_editor(ts.load_data()["last"])
         elif name == "library":
             self._dialog = ts.LibraryDialog(self.root, self.th, self.f,
@@ -138,7 +154,8 @@ class MainMenu:
     def hit(self, x, y):
         if self.view == "home":
             if HEADER <= y < HEADER + len(ITEMS) * ROW:
-                return int((y - HEADER) // ROW)
+                i = int((y - HEADER) // ROW)
+                return i if self.item_enabled(i) else None   # greyed row: no hover/click
             return None
         for key, (x0, y0, x1, y1) in self.srects().items():
             if x0 <= x <= x1 and y0 <= y <= y1:
@@ -187,10 +204,19 @@ class MainMenu:
         k = e.keysym
         if self.view == "home":
             n = len(ITEMS)
+
+            def step(d):
+                i = self.hot if self.hot is not None else (-1 if d > 0 else n)
+                for _ in range(n):
+                    i = (i + d) % n
+                    if self.item_enabled(i):
+                        return i
+                return None
+
             if k == "Down":
-                self.hot = 0 if self.hot is None else (self.hot + 1) % n
+                self.hot = step(1)
             elif k == "Up":
-                self.hot = n - 1 if self.hot is None else (self.hot - 1) % n
+                self.hot = step(-1)
             elif k in ("Return", "KP_Enter") and self.hot is not None:
                 self.activate(self.hot)
         elif k == "Escape":
@@ -208,9 +234,12 @@ class MainMenu:
     def icon(self, name, cx, cy, col):
         """Small line icons drawn on the canvas, same style as the overlay's buttons."""
         c = self.c
-        if name == "start":         # play
+        if name == "continue":      # play
             c.create_polygon(cx - 5, cy - 8, cx - 5, cy + 8, cx + 8, cy,
                              fill=col, outline=col, joinstyle="round")
+        elif name == "start":       # plus (new run)
+            c.create_line(cx - 8, cy, cx + 8, cy, fill=col, width=3, capstyle="round")
+            c.create_line(cx, cy - 8, cx, cy + 8, fill=col, width=3, capstyle="round")
         elif name == "library":     # folder
             c.create_rectangle(cx - 9, cy - 8, cx - 1, cy - 4, fill=col, outline=col)
             c.create_rectangle(cx - 9, cy - 5, cx + 9, cy + 8, fill="", outline=col, width=2)
@@ -227,10 +256,13 @@ class MainMenu:
             c.create_line(cx - 2, cy - 6, cx - 8, cy, cx - 2, cy + 6, fill=col, width=2,
                           capstyle="round", joinstyle="round")
 
-    def row(self, y0, label, sub, hot, danger=False, icon=None):
+    def row(self, y0, label, sub, hot, danger=False, icon=None, disabled=False):
         c, th, f = self.c, self.th, self.f
         y1 = y0 + ROW
-        if hot:
+        if disabled:
+            c.create_line(0, y1 - 1, W, y1 - 1, fill=th["sep"])
+            tcol = scol = icol = ts.lerp(th["bg"], th["dim"], 0.5)
+        elif hot:
             top, bot = ("#c0392b", "#8e1f14") if danger else (th["cur_top"], th["cur_bot"])
             ts.vgrad(c, 0, y0, W, y1, top, bot)
             tcol, scol = th["cur_text"], "#ffd9d4" if danger else "#d6e4ff"
@@ -252,7 +284,8 @@ class MainMenu:
         c, th, f = self.c, self.th, self.f
         self.header("TaskSplit", "DAILY TASK SPLITS")
         subs = {
-            "start": "new run",
+            "continue": self.snap_summary() if self.snap else "no saved run",
+            "start": "",
             "library": (f"{self.lib_count} set{'s' if self.lib_count != 1 else ''}"
                         if self.lib_count else "none yet"),
             "settings": f"{self.theme_name.title()}  \u2022  {self.size}",
@@ -260,7 +293,7 @@ class MainMenu:
         }
         for i, k in enumerate(ITEMS):
             self.row(HEADER + i * ROW, LABELS[k], subs[k], self.hot == i,
-                     danger=(k == "quit"), icon=k)
+                     danger=(k == "quit"), icon=k, disabled=not self.item_enabled(i))
 
         # footer: a live clock, styled like the overlay's timer
         y0 = HEADER + len(ITEMS) * ROW
@@ -379,7 +412,10 @@ def main():
         res = MainMenu().run()
         if res is None:
             break                                   # Quit
-        ts.TaskSplit(res["title"], res["subtitle"], res["tasks"]).run()
+        if "snapshot" in res:                       # Continue
+            ts.TaskSplit(snapshot=res["snapshot"]).run()
+        else:                                       # Start New
+            ts.TaskSplit(res["title"], res["subtitle"], res["tasks"]).run()
         # overlay closed -> loop around and show the main menu again
 
 

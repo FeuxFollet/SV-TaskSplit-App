@@ -56,7 +56,8 @@ PAGE_TITLES = [("TaskSplit", "DAILY TASK SPLITS"),
                ("Page 4", "PLACEHOLDER PAGE")]
 
 BODY_H = len(ITEMS) * ROW                       # area the button rows live in
-W, H = 340, HEADER + BODY_H + PAGER_H + 94      # 94 = clock footer
+CLOCK_H = 94                                    # clock footer (page 1 only)
+W, H = 340, HEADER + BODY_H + CLOCK_H + PAGER_H  # page bar sits at the very bottom
 
 
 def resource(name):
@@ -292,8 +293,8 @@ class MainMenu:
 
     def prects(self):
         """Page bar hit areas: arrows on the sides, one cell per dot in the middle."""
-        y0 = HEADER + BODY_H
-        y1 = y0 + PAGER_H
+        y0 = H - PAGER_H
+        y1 = H
         r = {("page", -1): (12, y0 + 5, 52, y1 - 5),
              ("page", 1): (W - 52, y0 + 5, W - 12, y1 - 5)}
         n = len(PAGES)
@@ -458,7 +459,9 @@ class MainMenu:
 
     def draw_pager(self, y0):
         c, th = self.c, self.th
-        c.create_line(0, y0, W, y0, fill=th["sep"])
+        # same gradient as the header, flipped line on top
+        ts.vgrad(c, 0, y0, W, H, th["head_top"], th["head_bot"])
+        c.create_line(0, y0, W, y0, fill=th["head_line"])
         for key, (x0, ya, x1, yb) in self.prects().items():
             kind, v = key
             mid = (ya + yb) / 2
@@ -503,19 +506,26 @@ class MainMenu:
                              here and self.hot == i, danger=(name == "quit"), icon=name,
                              disabled=(name == "continue" and self.snap is None), ox=ox)
 
-        self.draw_pager(HEADER + BODY_H)
+        # footer clock lives on page 1 only, so it slides in/out with that page
+        for k in (-1, 0, 1):
+            ox = (k * n - self.pos) * W
+            if -W < ox < W:
+                self.draw_clock(HEADER + BODY_H, ox)
 
-        # footer: a live clock, styled like the overlay's timer
-        y0 = HEADER + BODY_H + PAGER_H
-        c.create_line(0, y0, W, y0, fill=th["footer_line"])
+        self.draw_pager(H - PAGER_H)
+
+    def draw_clock(self, y0, ox):
+        """A live clock, styled like the overlay's timer."""
+        c, th, f = self.c, self.th, self.f
+        c.create_line(ox, y0, ox + W, y0, fill=th["footer_line"])
         now = datetime.datetime.now()
         main, dec = now.strftime("%H:%M"), now.strftime(":%S")
-        right = W - 20
+        right = ox + W - 20
         base_y = y0 + 58
         c.create_text(right, base_y, anchor="se", text=dec, font=f.clockdec, fill=th["green"])
         c.create_text(right - f.clockdec.measure(dec), base_y + 2, anchor="se",
                       text=main, font=f.clock, fill=th["green"])
-        c.create_text(20, y0 + 82, anchor="w", text="LOCAL TIME", font=f.lbl, fill=th["dim"])
+        c.create_text(ox + 20, y0 + 82, anchor="w", text="LOCAL TIME", font=f.lbl, fill=th["dim"])
         c.create_text(right, y0 + 82, anchor="e", text=now.strftime("%a %d %b").upper(),
                       font=f.lbl, fill=th["dim"])
 

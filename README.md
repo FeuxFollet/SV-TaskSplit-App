@@ -15,9 +15,8 @@ One fateful Tuesday, PP decided standard to-do lists were too slow. *"If speedru
 
 His daily splits included:
 1. **"Wake up and immediately look busy"** — *Personal Best: 3.4s*
-2. **"Stare at the terminal wondering why `/usr/bin/env` failed"** — *Gold Split*
-3. **"Open 53 StackOverflow tabs and read none of them"** — *Sub-optimal split (+12.4s)*
-4. **"Write lore in the README instead of working"** — *World Record Pace*
+2. **"Stare at the terminal wondering why the program failed"** — *Gold Split*
+3. **"Asks Chatgpt and read none of them"** — *Sub-optimal split (+12.4s)*
 
 To this day, whenever someone opens TaskSplit, you can hear PP violently mashing `Ctrl + Alt + Space` to shave 0.2 seconds off his coffee break.
 

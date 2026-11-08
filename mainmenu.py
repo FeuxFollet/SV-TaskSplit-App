@@ -8,10 +8,14 @@ Keep it in the same folder as tsv2.py.
                (right-click the overlay -> "Quit to main menu" saves your run)
   Saved Tasks  -> your library of saved task sets (save from any task editor)
   Settings     -> overlay size + dark / light theme
+  AFK (page 2) -> pick a reason, an image pops up in the middle of your screen
   Quit         -> close the app
 """
 import datetime
+import math
 import os
+import random
+import re
 import sys
 import tkinter as tk
 from fractions import Fraction
@@ -34,24 +38,54 @@ LOGO_Y = -1                  # vertical nudge: negative = up, positive = down
 LOGO_CENTER = False         # True = ignore LOGO_X and centre it horizontally
 # ===================================================================
 
+# ===================================================================
+#  AFK SETTINGS  -  tweak these to taste
+# ===================================================================
+# Each prompt is  ("text shown in the list", "image file name", RANDOM)
+#
+#   RANDOM = False -> always shows  <name>.png  (e.g. bathroom.png)
+#   RANDOM = True  -> picks a random one of  <name>.png, <name>1.png, <name>2.png ...
+#                     (never the same one twice in a row, if there is more than one)
+#
+# >>> TO TURN RANDOMIZING ON/OFF FOR A PROMPT, CHANGE True / False ON ITS LINE <<<
+#
+# Put the images in  resources/afk/  e.g.  resources/afk/bathroom1.png
+# (.png always works; .jpg/.jpeg/.webp/.bmp also work if Pillow is installed).
+AFK_DIR = os.path.join("resources", "afk")
+AFK_PROMPTS = [
+    #  label                   file name      random?
+    ("Unspecified Reason",    "unspecified",  False),
+    ("Bathroom Break",        "bathroom",     True),
+    ("Food Break",            "food",         True),
+    ("Drink / Water",         "drink",        False),
+    ("Phone Call",            "phone",        False),
+    ("Someone At The Door",   "door",         False),
+    ("Stretch Break",         "stretch",      True),
+    ("Quick Nap",             "nap",          False),
+    ("Be Right Back",         "brb",          True),
+]
+AFK_SCREEN_FRACTION = 0.7   # image fits inside this fraction of the screen (0.5 = 50%)
+AFK_UPSCALE = True          # True = small images are enlarged to reach that size
+# ===================================================================
+
 HEADER = 80
 ROW = 58
 PAGER_H = 36                # height of the page bar under the buttons
 ITEMS = ("continue", "start", "library", "settings", "quit")
 LABELS = {"continue": "Continue", "start": "Start New", "library": "Saved Tasks",
           "settings": "Settings", "quit": "Quit",
-          "ph2": "Placeholder 2", "ph3": "Placeholder 3", "ph4": "Placeholder 4"}
+          "afk": "AFK", "ph3": "Placeholder 3", "ph4": "Placeholder 4"}
 
 # Horizontal pages. Each page is a tuple of button names (max len(ITEMS) per page).
 # To add a button to a page, add its name here + a label in LABELS + a case in act().
 PAGES = [
     ITEMS,
-    ("ph2",),
+    ("afk",),
     ("ph3",),
     ("ph4",),
 ]
 PAGE_TITLES = [("TaskSplit", "DAILY TASK SPLITS"),
-               ("Page 2", "PLACEHOLDER PAGE"),
+               ("Away", "AFK SCREENS"),
                ("Page 3", "PLACEHOLDER PAGE"),
                ("Page 4", "PLACEHOLDER PAGE")]
 
@@ -72,6 +106,104 @@ def scale_image(img, scale):
         return img
     fr = Fraction(scale).limit_denominator(8)
     return img.zoom(fr.numerator, fr.numerator).subsample(fr.denominator, fr.denominator)
+
+
+AFK_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+
+
+def find_images(base):
+    """All files for a prompt: base.png, base1.png, base2.png ... (sorted, exact name first)."""
+    folder = resource(AFK_DIR)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    pat = re.compile(re.escape(base) + r"(\d*)", re.I)
+    found = []
+    for fn in names:
+        stem, ext = os.path.splitext(fn)
+        m = pat.fullmatch(stem)
+        if m and ext.lower() in AFK_EXTS:
+            n = int(m.group(1)) if m.group(1) else 0
+            found.append((n, ext.lower() != ".png", fn))
+    found.sort()
+    return [os.path.join(folder, fn) for _, _, fn in found]
+
+
+def find_image(base):
+    """First image for a prompt (the plain  <base>.png  if it exists), or None."""
+    imgs = find_images(base)
+    return imgs[0] if imgs else None
+
+
+def pick_image(base, randomize, last=None):
+    """Which file to show: a random one (not `last` again) or always the first."""
+    imgs = find_images(base)
+    if not imgs:
+        return None
+    if randomize and len(imgs) > 1:
+        choices = [p for p in imgs if p != last] or imgs
+        return random.choice(choices)
+    return imgs[0]
+
+
+def prompt_info(i):
+    """(label, file base name, randomize?) for AFK_PROMPTS[i]; RANDOM defaults to False."""
+    p = AFK_PROMPTS[i]
+    return p[0], p[1], (bool(p[2]) if len(p) > 2 else False)
+
+
+def fit_scale(iw, ih, maxw, maxh, upscale=True):
+    """Scale factor that fits iw x ih inside maxw x maxh, keeping the aspect ratio."""
+    sc = min(maxw / iw, maxh / ih)
+    return sc if upscale else min(sc, 1.0)
+
+
+def load_fitted(path, maxw, maxh, upscale=True):
+    """Load an image scaled to fit inside maxw x maxh (aspect ratio kept)."""
+    try:
+        from PIL import Image, ImageTk
+    except ImportError:
+        Image = None
+    if Image:                                   # smooth, any format
+        im = Image.open(path)
+        im.load()
+        iw, ih = im.size
+        sc = fit_scale(iw, ih, maxw, maxh, upscale)
+        im = im.convert("RGBA").resize((max(1, round(iw * sc)), max(1, round(ih * sc))),
+                                       Image.LANCZOS)
+        return ImageTk.PhotoImage(im)
+    img = tk.PhotoImage(file=path)              # plain tkinter: png / gif only
+    sc = fit_scale(img.width(), img.height(), maxw, maxh, upscale)
+    fr = Fraction(sc).limit_denominator(32)
+    if fr > sc:                                 # never overshoot the screen budget
+        fr = Fraction(max(1, int(sc * 32)), 32)
+    if fr == 1:
+        return img
+    out = tk.PhotoImage()
+    out.tk.call(out, "copy", img, "-zoom", fr.numerator, fr.numerator,
+                "-subsample", fr.denominator, fr.denominator)
+    return out
+
+
+def moon_points(cx, cy, R=8.0, r=6.5, dx=4.0, dy=2.0, steps=14):
+    """Polygon for a crescent moon (a circle with a bite taken out of it)."""
+    d = math.hypot(dx, dy)
+    td = math.atan2(dy, dx)                     # direction of the bite (math coords, y up)
+    a = (R * R - r * r + d * d) / (2 * d)
+    alpha = math.acos(max(-1, min(1, a / R)))
+    beta = math.acos(max(-1, min(1, (d - a) / r)))
+
+    def pt(ox, oy, rad, ang):
+        return (cx + ox + rad * math.cos(ang), cy - (oy + rad * math.sin(ang)))
+
+    outer = [pt(0, 0, R, td + alpha + (2 * math.pi - 2 * alpha) * k / steps)
+             for k in range(steps + 1)]
+    inner = [pt(dx, dy, r, td + math.pi - beta + 2 * beta * k / steps)
+             for k in range(steps + 1)]
+    if math.dist(outer[-1], inner[0]) > math.dist(outer[-1], inner[-1]):
+        inner.reverse()
+    return [v for p in outer + inner for v in p]
 
 
 class MainMenu:
@@ -102,6 +234,16 @@ class MainMenu:
         self.pos = 0.0              # current (animated) page position, may be fractional
         self.target = 0             # page we're sliding to (can be outside 0..n-1 while wrapping)
         self._anim_job = None
+        # AFK page state
+        self.afk_scroll = 0.0       # current (animated) scroll offset in px
+        self.afk_target = 0.0
+        self._afk_job = None
+        self._afk_win = None        # the image window, when open
+        self._afk_keep = None       # keeps the PhotoImage alive
+        self._rehover = False
+        self._mouse = None
+        self.afk_has = {}           # prompt key -> number of image files found
+        self._afk_last = {}         # prompt key -> file shown last time (for no-repeat random)
 
         self.c.bind("<Motion>", self.on_motion)
         self.c.bind("<Leave>", self.on_leave)
@@ -171,6 +313,92 @@ class MainMenu:
         """i = row index on the CURRENT page."""
         return self.page_items()[i] != "continue" or self.snap is not None
 
+    # ---- AFK
+    def afk_max(self):
+        return max(0, len(AFK_PROMPTS) * ROW - (H - ROW - HEADER))
+
+    def afk_scroll_by(self, d, from_mouse=False):
+        self.afk_target = min(max(self.afk_target + d, 0), self.afk_max())
+        self._rehover = from_mouse
+        if self._afk_job is None:
+            self._afk_step()
+
+    def _afk_step(self):
+        d = self.afk_target - self.afk_scroll
+        if abs(d) < 0.5:
+            self.afk_scroll = self.afk_target
+            self._afk_job = None
+        else:
+            self.afk_scroll += d * 0.3
+            self._afk_job = self.root.after(16, self._afk_step)
+        if self._rehover and self._mouse:           # row under a still mouse changes
+            self.hot = self.hit(*self._mouse)
+        self.draw()
+
+    def afk_keep_visible(self, i):
+        vh = H - ROW - HEADER
+        top = i * ROW
+        if top < self.afk_target:
+            self.afk_scroll_by(top - self.afk_target)
+        elif top + ROW > self.afk_target + vh:
+            self.afk_scroll_by(top + ROW - vh - self.afk_target)
+
+    def close_afk(self, *_):
+        if self._afk_win is not None:
+            try:
+                self._afk_win.destroy()
+            except tk.TclError:
+                pass
+        self._afk_win = None
+        self._afk_keep = None
+
+    def open_afk(self, i):
+        """Show prompt i's image in the middle of the screen at AFK_SCREEN_FRACTION."""
+        label, base, rnd = prompt_info(i)
+        self.close_afk()
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        maxw, maxh = int(sw * AFK_SCREEN_FRACTION), int(sh * AFK_SCREEN_FRACTION)
+        path = pick_image(base, rnd, self._afk_last.get(base))
+        if path:
+            self._afk_last[base] = path
+        img, note = None, ""
+        if path:
+            try:
+                img = load_fitted(path, maxw, maxh, AFK_UPSCALE)
+            except Exception as ex:
+                note = f"Couldn't load {os.path.basename(path)} ({type(ex).__name__})"
+        else:
+            note = f"Add  {AFK_DIR.replace(os.sep, '/')}/{base}.png"
+
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=self.th["edge"])
+        if img is not None:
+            w, h = img.width(), img.height()
+            body = tk.Label(win, image=img, bd=0, highlightthickness=0, cursor="hand2")
+            self._afk_keep = img
+        else:                                       # no image yet: draw a stand-in card
+            w = int(min(maxw, maxh * 16 / 9))
+            h = int(w * 9 / 16)
+            fs = ts.make_fonts(max(1.0, w / 520))
+            body = tk.Canvas(win, width=w, height=h, highlightthickness=0, bd=0,
+                             cursor="hand2")
+            ts.vgrad(body, 0, 0, w, h, self.th["head_top"], self.th["head_bot"])
+            body.create_text(w / 2, h / 2 - h * 0.05, text=label, font=fs.clock,
+                             fill=self.th["text"])
+            body.create_text(w / 2, h / 2 + h * 0.12, text=note, font=fs.menu,
+                             fill=self.th["dim"])
+            self._afk_keep = fs
+        body.pack(padx=2, pady=2)
+        win.geometry(f"{w + 4}x{h + 4}+{(sw - w - 4) // 2}+{(sh - h - 4) // 2}")
+        for wd in (win, body):
+            wd.bind("<Button-1>", self.close_afk)
+        win.bind("<Escape>", self.close_afk)
+        win.bind("<Key>", self.close_afk)
+        self._afk_win = win
+        win.after(50, win.focus_force)
+
     # ---- page sliding
     def slide(self, d):
         """Go d pages right (negative = left). Wraps around."""
@@ -204,9 +432,16 @@ class MainMenu:
         self.draw()
 
     def on_wheel(self, e):
-        if self.view != "home" or self.dialog_alive() or self.animating:
+        if self.dialog_alive():
             return
         up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+        if self.view == "afk":
+            notches = abs(getattr(e, "delta", 0)) / 120 or 1
+            step = min(3.0, notches) * ROW * 0.75
+            self.afk_scroll_by(-step if up else step, from_mouse=True)
+            return
+        if self.view != "home" or self.animating:
+            return
         self.slide(-1 if up else 1)
 
     def snap_summary(self):
@@ -231,9 +466,13 @@ class MainMenu:
                                             on_pick=self.open_editor, action_text="Open")
         elif name == "settings":
             self.view, self.hot = "settings", None
+        elif name == "afk":
+            self.view, self.hot = "afk", None
+            self.afk_scroll = self.afk_target = 0.0
+            self.afk_has = {p[1]: len(find_images(p[1])) for p in AFK_PROMPTS}
         elif name == "quit":
             self.quit()
-        # ph2 / ph3 / ph4 are placeholders: they do nothing yet
+        # ph3 / ph4 are placeholders: they do nothing yet
 
     def open_editor(self, s):
         self._dialog = ts.TaskEditor(
@@ -269,6 +508,11 @@ class MainMenu:
                     self.go(key[1])
             else:
                 self.act(self.page_items()[key])
+        elif self.view == "afk":
+            if key == "back":
+                self.view, self.hot = "home", None
+            else:
+                self.open_afk(key[1])
         elif key == "back":
             self.view, self.hot = "home", None
         else:
@@ -317,12 +561,21 @@ class MainMenu:
                 if x0 <= x <= x1 and y0 <= y <= y1:
                     return key
             return None
+        if self.view == "afk":
+            if y >= H - ROW:
+                return "back"
+            if HEADER <= y < H - ROW:
+                i = int((y - HEADER + self.afk_scroll) // ROW)
+                if 0 <= i < len(AFK_PROMPTS):
+                    return ("afk", i)
+            return None
         for key, (x0, y0, x1, y1) in self.srects().items():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 return key
         return None
 
     def on_motion(self, e):
+        self._mouse = (e.x, e.y)
         h = self.hit(e.x, e.y)
         if h != self.hot:
             self.hot = h
@@ -330,6 +583,7 @@ class MainMenu:
             self.draw()
 
     def on_leave(self, e):
+        self._mouse = None
         if self.hot is not None:
             self.hot = None
             self.c.config(cursor="")
@@ -385,6 +639,18 @@ class MainMenu:
                 self.hot = step(-1)
             elif k in ("Return", "KP_Enter") and self.hot is not None:
                 self.activate(self.hot)
+        elif self.view == "afk":
+            n = len(AFK_PROMPTS)
+            cur = self.hot[1] if isinstance(self.hot, tuple) else None
+            if k in ("Down", "Up"):
+                cur = (0 if k == "Down" else n - 1) if cur is None else \
+                    (cur + (1 if k == "Down" else -1)) % n
+                self.hot = ("afk", cur)
+                self.afk_keep_visible(cur)
+            elif k in ("Return", "KP_Enter") and cur is not None:
+                self.open_afk(cur)
+            elif k == "Escape":
+                self.view, self.hot = "home", None
         elif k == "Escape":
             self.view, self.hot = "home", None
         self.draw()
@@ -425,7 +691,14 @@ class MainMenu:
             c.create_arc(cx - 8, cy - 7, cx + 8, cy + 9, start=120, extent=300,
                          style="arc", outline=col, width=2)
             c.create_line(cx, cy - 10, cx, cy, fill=col, width=2, capstyle="round")
-        elif name in ("ph2", "ph3", "ph4"):     # diamond
+        elif name == "afk":         # crescent moon
+            c.create_polygon(moon_points(cx, cy), fill=col, outline=col, joinstyle="round")
+        elif name == "image":       # picture frame
+            c.create_rectangle(cx - 9, cy - 7, cx + 9, cy + 7, fill="", outline=col, width=2)
+            c.create_polygon(cx - 7, cy + 5, cx - 2, cy - 1, cx + 2, cy + 3, cx + 4, cy + 1,
+                             cx + 7, cy + 5, fill=col, outline=col)
+            c.create_oval(cx + 3, cy - 5, cx + 6, cy - 2, fill=col, outline=col)
+        elif name in ("ph3", "ph4"):            # diamond
             c.create_polygon(cx, cy - 9, cx + 9, cy, cx, cy + 9, cx - 9, cy,
                              fill="", outline=col, width=2)
         elif name == "back":        # left arrow
@@ -492,6 +765,7 @@ class MainMenu:
                         if self.lib_count else "none yet"),
             "settings": f"{self.theme_name.title()}  \u2022  {self.size}",
             "quit": "",
+            "afk": f"{len(AFK_PROMPTS)} screens",
         }
         # sliding pages: draw every page copy that is (partly) on screen
         n = len(PAGES)
@@ -598,11 +872,35 @@ class MainMenu:
         self.preview(262)
         self.row(H - ROW, "Back", "Esc", self.hot == "back", icon="back")
 
+    def draw_afk(self):
+        c, th = self.c, self.th
+        for i in range(len(AFK_PROMPTS)):
+            label, base, rnd = prompt_info(i)
+            y0 = HEADER + i * ROW - self.afk_scroll
+            if y0 + ROW <= HEADER or y0 >= H - ROW:
+                continue
+            cnt = self.afk_has.get(base, 0)
+            sub = ("no image" if not cnt else
+                   f"random \u2022 {cnt}" if rnd and cnt > 1 else "")
+            self.row(y0, label, sub, self.hot == ("afk", i), icon="image")
+        self.header("AFK", "PICK A REASON TO SHOW")      # opaque: covers rows scrolled under it
+        mx = self.afk_max()
+        if mx > 0:                                       # slim scrollbar
+            top, bot = HEADER + 6, H - ROW - 6
+            th_h = max(24, (bot - top) * (H - ROW - HEADER) / (len(AFK_PROMPTS) * ROW))
+            ty = top + (bot - top - th_h) * (self.afk_scroll / mx)
+            c.create_rectangle(W - 6, top, W - 3, bot, fill=th["sep"], outline="")
+            c.create_rectangle(W - 6, ty, W - 3, ty + th_h, fill=th["btn_edge_hover"], outline="")
+        c.create_rectangle(0, H - ROW, W, H, fill=th["bg"], outline="")
+        self.row(H - ROW, "Back", "Esc", self.hot == "back", icon="back")
+
     def draw(self):
         c = self.c
         c.delete("all")
         if self.view == "home":
             self.draw_home()
+        elif self.view == "afk":
+            self.draw_afk()
         else:
             self.draw_settings()
         c.create_rectangle(0, 0, W - 1, H - 1, outline=self.th["edge"])

@@ -11,9 +11,28 @@ Keep it in the same folder as tsv2.py.
   Quit         -> close the app
 """
 import datetime
+import os
+import sys
 import tkinter as tk
+from fractions import Fraction
 
 import tsv2 as ts
+
+# ===================================================================
+#  LOGO SETTINGS  -  tweak these to taste
+# ===================================================================
+# Put your image(s) in a folder called  resources  next to mainmenu.py
+# (PNG, transparent bg).
+# It looks for  logo_dark.png / logo_light.png  (matching the theme) first,
+# then falls back to a single  logo.png  for both themes. If none exist,
+# the plain text title "TaskSplit" is shown instead.
+LOGO_DIR = "resources"      # folder (next to mainmenu.py) that holds the logo files
+LOGO_FILE = "logo"          # base name -> logo_dark.png, logo_light.png, logo.png
+LOGO_SCALE = 0.28            # size multiplier: 0.5 = half size, 2.0 = double
+LOGO_X = 6                 # pixels from the LEFT edge of the window (bigger = right)
+LOGO_Y = -1                  # vertical nudge: negative = up, positive = down
+LOGO_CENTER = False         # True = ignore LOGO_X and centre it horizontally
+# ===================================================================
 
 W, H = 340, 480
 HEADER = 80
@@ -21,6 +40,20 @@ ROW = 58
 ITEMS = ("continue", "start", "library", "settings", "quit")
 LABELS = {"continue": "Continue", "start": "Start New", "library": "Saved Tasks",
           "settings": "Settings", "quit": "Quit"}
+
+
+def resource(name):
+    """Find a bundled file, both from the .py and inside a PyInstaller exe."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
+def scale_image(img, scale):
+    """Scale a tk.PhotoImage by any factor (smooth with Pillow, else zoom/subsample)."""
+    if abs(scale - 1.0) < 0.01:
+        return img
+    fr = Fraction(scale).limit_denominator(8)
+    return img.zoom(fr.numerator, fr.numerator).subsample(fr.denominator, fr.denominator)
 
 
 class MainMenu:
@@ -47,6 +80,7 @@ class MainMenu:
         self._press_hot = None
         self._press_y = 0
         self._moved = False
+        self._logos = {}            # theme name -> PhotoImage (or None); must stay referenced
 
         self.c.bind("<Motion>", self.on_motion)
         self.c.bind("<Leave>", self.on_leave)
@@ -68,6 +102,32 @@ class MainMenu:
     def apply_theme(self):
         self.root.configure(bg=self.th["bg"])
         self.c.configure(bg=self.th["bg"])
+
+    def get_logo(self):
+        """The logo image for the current theme, or None if there isn't one."""
+        name = self.theme_name
+        if name in self._logos:
+            return self._logos[name]
+        img = None
+        for fn in (f"{LOGO_FILE}_{name}.png", f"{LOGO_FILE}.png"):
+            path = resource(os.path.join(LOGO_DIR, fn))
+            if os.path.exists(path):
+                try:
+                    img = tk.PhotoImage(file=path)
+                    try:                                    # smooth resize if Pillow is installed
+                        from PIL import Image, ImageTk
+                        im = Image.open(path).convert("RGBA")
+                        w, h = im.size
+                        im = im.resize((max(1, int(w * LOGO_SCALE)),
+                                        max(1, int(h * LOGO_SCALE))), Image.LANCZOS)
+                        img = ImageTk.PhotoImage(im)
+                    except Exception:
+                        img = scale_image(img, LOGO_SCALE)
+                    break
+                except tk.TclError:
+                    img = None
+        self._logos[name] = img
+        return img
 
     # ------------------------------------------------------------ actions
     def dialog_alive(self):
@@ -224,12 +284,20 @@ class MainMenu:
         self.draw()
 
     # ------------------------------------------------------------ drawing
-    def header(self, title, sub):
+    def header(self, title, sub, logo=False):
         c, th, f = self.c, self.th, self.f
         ts.vgrad(c, 0, 0, W, HEADER, th["head_top"], th["head_bot"])
         c.create_line(0, HEADER - 1, W, HEADER - 1, fill=th["head_line"])
-        c.create_text(20, 34, anchor="w", text=title, font=f.h1, fill=th["text"])
-        c.create_text(20, 60, anchor="w", text=sub, font=f.sub, fill=th["dim"])
+        img = self.get_logo() if logo else None
+        if img:
+            y = HEADER // 2 + LOGO_Y
+            if LOGO_CENTER:
+                c.create_image(W // 2, y, anchor="center", image=img)
+            else:
+                c.create_image(LOGO_X, y, anchor="w", image=img)
+        else:
+            c.create_text(20, 34, anchor="w", text=title, font=f.h1, fill=th["text"])
+            c.create_text(20, 60, anchor="w", text=sub, font=f.sub, fill=th["dim"])
 
     def icon(self, name, cx, cy, col):
         """Small line icons drawn on the canvas, same style as the overlay's buttons."""
@@ -253,7 +321,8 @@ class MainMenu:
             c.create_line(cx, cy - 10, cx, cy, fill=col, width=2, capstyle="round")
         elif name == "back":        # left arrow
             c.create_line(cx + 8, cy, cx - 8, cy, fill=col, width=2, capstyle="round")
-            c.create_line([cx - 2, cy - 6, cx - 8, cy, cx - 2, cy + 6], fill=col, width=2, capstyle="round", joinstyle="round")
+            c.create_line(cx - 2, cy - 6, cx - 8, cy, cx - 2, cy + 6, fill=col, width=2,
+                          capstyle="round", joinstyle="round")
 
     def row(self, y0, label, sub, hot, danger=False, icon=None, disabled=False):
         c, th, f = self.c, self.th, self.f
@@ -281,10 +350,10 @@ class MainMenu:
 
     def draw_home(self):
         c, th, f = self.c, self.th, self.f
-        self.header("TaskSplit", "DAILY TASK SPLITS")
+        self.header("TaskSplit", "DAILY TASK SPLITS", logo=True)
         subs = {
             "continue": self.snap_summary() if self.snap else "no saved run",
-            "start": "",
+            "start": "new run",
             "library": (f"{self.lib_count} set{'s' if self.lib_count != 1 else ''}"
                         if self.lib_count else "none yet"),
             "settings": f"{self.theme_name.title()}  \u2022  {self.size}",

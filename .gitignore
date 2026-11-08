@@ -1,3 +1,6 @@
 # Ignore Python cache folders
 __pycache__/
 *.py[cod]
+
+# Development Tools
+dev.py

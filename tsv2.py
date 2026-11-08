@@ -1188,7 +1188,7 @@ class TaskSplit:
         for k in range(19):
             t = math.radians(t0 + (t1 - t0) * k / 18)
             pts += [cx + r * math.cos(t), cy - r * math.sin(t)]
-        self.canvas.create_line(*pts, fill=col, width=2 * self.s, smooth=True)
+        self.canvas.create_line(pts, fill=col, width=2 * self.s, smooth=True)
         t = math.radians(t1)
         ex, ey = cx + r * math.cos(t), cy - r * math.sin(t)
         tx, ty = -math.sin(t), -math.cos(t)  # direction of travel

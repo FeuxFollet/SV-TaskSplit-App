@@ -253,8 +253,7 @@ class MainMenu:
             c.create_line(cx, cy - 10, cx, cy, fill=col, width=2, capstyle="round")
         elif name == "back":        # left arrow
             c.create_line(cx + 8, cy, cx - 8, cy, fill=col, width=2, capstyle="round")
-            c.create_line(cx - 2, cy - 6, cx - 8, cy, cx - 2, cy + 6, fill=col, width=2,
-                          capstyle="round", joinstyle="round")
+            c.create_line([cx - 2, cy - 6, cx - 8, cy, cx - 2, cy + 6], fill=col, width=2, capstyle="round", joinstyle="round")
 
     def row(self, y0, label, sub, hot, danger=False, icon=None, disabled=False):
         c, th, f = self.c, self.th, self.f

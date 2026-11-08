@@ -34,12 +34,29 @@ LOGO_Y = -1                  # vertical nudge: negative = up, positive = down
 LOGO_CENTER = False         # True = ignore LOGO_X and centre it horizontally
 # ===================================================================
 
-W, H = 340, 480
 HEADER = 80
 ROW = 58
+PAGER_H = 36                # height of the page bar under the buttons
 ITEMS = ("continue", "start", "library", "settings", "quit")
 LABELS = {"continue": "Continue", "start": "Start New", "library": "Saved Tasks",
-          "settings": "Settings", "quit": "Quit"}
+          "settings": "Settings", "quit": "Quit",
+          "ph2": "Placeholder 2", "ph3": "Placeholder 3", "ph4": "Placeholder 4"}
+
+# Horizontal pages. Each page is a tuple of button names (max len(ITEMS) per page).
+# To add a button to a page, add its name here + a label in LABELS + a case in act().
+PAGES = [
+    ITEMS,
+    ("ph2",),
+    ("ph3",),
+    ("ph4",),
+]
+PAGE_TITLES = [("TaskSplit", "DAILY TASK SPLITS"),
+               ("Page 2", "PLACEHOLDER PAGE"),
+               ("Page 3", "PLACEHOLDER PAGE"),
+               ("Page 4", "PLACEHOLDER PAGE")]
+
+BODY_H = len(ITEMS) * ROW                       # area the button rows live in
+W, H = 340, HEADER + BODY_H + PAGER_H + 94      # 94 = clock footer
 
 
 def resource(name):
@@ -81,6 +98,9 @@ class MainMenu:
         self._press_y = 0
         self._moved = False
         self._logos = {}            # theme name -> PhotoImage (or None); must stay referenced
+        self.pos = 0.0              # current (animated) page position, may be fractional
+        self.target = 0             # page we're sliding to (can be outside 0..n-1 while wrapping)
+        self._anim_job = None
 
         self.c.bind("<Motion>", self.on_motion)
         self.c.bind("<Leave>", self.on_leave)
@@ -88,6 +108,8 @@ class MainMenu:
         self.c.bind("<B1-Motion>", self.on_drag)
         self.c.bind("<ButtonRelease-1>", self.on_release)
         self.root.bind("<Key>", self.on_key)
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.root.bind(ev, self.on_wheel)
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
     # ------------------------------------------------------------ data
@@ -133,8 +155,58 @@ class MainMenu:
     def dialog_alive(self):
         return self._dialog is not None and self._dialog.alive()
 
+    @property
+    def page(self):
+        return self.target % len(PAGES)
+
+    @property
+    def animating(self):
+        return self._anim_job is not None
+
+    def page_items(self):
+        return PAGES[self.page]
+
     def item_enabled(self, i):
-        return ITEMS[i] != "continue" or self.snap is not None
+        """i = row index on the CURRENT page."""
+        return self.page_items()[i] != "continue" or self.snap is not None
+
+    # ---- page sliding
+    def slide(self, d):
+        """Go d pages right (negative = left). Wraps around."""
+        self.target += d
+        self.hot = None
+        self._start_anim()
+
+    def go(self, p):
+        """Jump to page p by the shortest way round."""
+        n = len(PAGES)
+        diff = (p - self.page) % n
+        if diff > n / 2:
+            diff -= n
+        if diff:
+            self.slide(diff)
+
+    def _start_anim(self):
+        if self._anim_job is None:
+            self._step()
+
+    def _step(self):
+        d = self.target - self.pos
+        if abs(d) < 0.004:
+            n = len(PAGES)
+            self.target %= n
+            self.pos = float(self.target)
+            self._anim_job = None
+        else:
+            self.pos += d * 0.26
+            self._anim_job = self.root.after(16, self._step)
+        self.draw()
+
+    def on_wheel(self, e):
+        if self.view != "home" or self.dialog_alive() or self.animating:
+            return
+        up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+        self.slide(-1 if up else 1)
 
     def snap_summary(self):
         s = self.snap
@@ -160,6 +232,7 @@ class MainMenu:
             self.view, self.hot = "settings", None
         elif name == "quit":
             self.quit()
+        # ph2 / ph3 / ph4 are placeholders: they do nothing yet
 
     def open_editor(self, s):
         self._dialog = ts.TaskEditor(
@@ -188,7 +261,13 @@ class MainMenu:
 
     def activate(self, key):
         if self.view == "home":
-            self.act(ITEMS[key])
+            if isinstance(key, tuple):
+                if key[0] == "page":
+                    self.slide(key[1])
+                else:
+                    self.go(key[1])
+            else:
+                self.act(self.page_items()[key])
         elif key == "back":
             self.view, self.hot = "home", None
         else:
@@ -211,11 +290,31 @@ class MainMenu:
         r["back"] = (0, H - ROW, W, H)
         return r
 
+    def prects(self):
+        """Page bar hit areas: arrows on the sides, one cell per dot in the middle."""
+        y0 = HEADER + BODY_H
+        y1 = y0 + PAGER_H
+        r = {("page", -1): (12, y0 + 5, 52, y1 - 5),
+             ("page", 1): (W - 52, y0 + 5, W - 12, y1 - 5)}
+        n = len(PAGES)
+        gap = 22
+        x = W / 2 - (n - 1) * gap / 2
+        for i in range(n):
+            r[("dot", i)] = (x + i * gap - gap / 2, y0, x + i * gap + gap / 2, y1)
+        return r
+
     def hit(self, x, y):
         if self.view == "home":
-            if HEADER <= y < HEADER + len(ITEMS) * ROW:
+            if self.animating:
+                return None
+            if HEADER <= y < HEADER + BODY_H:
                 i = int((y - HEADER) // ROW)
+                if i >= len(self.page_items()):
+                    return None
                 return i if self.item_enabled(i) else None   # greyed row: no hover/click
+            for key, (x0, y0, x1, y1) in self.prects().items():
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    return key
             return None
         for key, (x0, y0, x1, y1) in self.srects().items():
             if x0 <= x <= x1 and y0 <= y <= y1:
@@ -263,7 +362,7 @@ class MainMenu:
             return
         k = e.keysym
         if self.view == "home":
-            n = len(ITEMS)
+            n = len(self.page_items())
 
             def step(d):
                 i = self.hot if self.hot is not None else (-1 if d > 0 else n)
@@ -273,7 +372,13 @@ class MainMenu:
                         return i
                 return None
 
-            if k == "Down":
+            if k == "Left":
+                self.slide(-1)
+            elif k == "Right":
+                self.slide(1)
+            elif k in ("1", "2", "3", "4") and int(k) <= len(PAGES):
+                self.go(int(k) - 1)
+            elif k == "Down":
                 self.hot = step(1)
             elif k == "Up":
                 self.hot = step(-1)
@@ -319,38 +424,64 @@ class MainMenu:
             c.create_arc(cx - 8, cy - 7, cx + 8, cy + 9, start=120, extent=300,
                          style="arc", outline=col, width=2)
             c.create_line(cx, cy - 10, cx, cy, fill=col, width=2, capstyle="round")
+        elif name in ("ph2", "ph3", "ph4"):     # diamond
+            c.create_polygon(cx, cy - 9, cx + 9, cy, cx, cy + 9, cx - 9, cy,
+                             fill="", outline=col, width=2)
         elif name == "back":        # left arrow
             c.create_line(cx + 8, cy, cx - 8, cy, fill=col, width=2, capstyle="round")
             c.create_line(cx - 2, cy - 6, cx - 8, cy, cx - 2, cy + 6, fill=col, width=2,
                           capstyle="round", joinstyle="round")
 
-    def row(self, y0, label, sub, hot, danger=False, icon=None, disabled=False):
+    def row(self, y0, label, sub, hot, danger=False, icon=None, disabled=False, ox=0):
         c, th, f = self.c, self.th, self.f
         y1 = y0 + ROW
         if disabled:
-            c.create_line(0, y1 - 1, W, y1 - 1, fill=th["sep"])
+            c.create_line(ox, y1 - 1, ox + W, y1 - 1, fill=th["sep"])
             tcol = scol = icol = ts.lerp(th["bg"], th["dim"], 0.5)
         elif hot:
             top, bot = ("#c0392b", "#8e1f14") if danger else (th["cur_top"], th["cur_bot"])
-            ts.vgrad(c, 0, y0, W, y1, top, bot)
+            ts.vgrad(c, ox, y0, ox + W, y1, top, bot)
             tcol, scol = th["cur_text"], "#ffd9d4" if danger else "#d6e4ff"
             icol = th["cur_text"]
         else:
-            c.create_line(0, y1 - 1, W, y1 - 1, fill=th["sep"])
+            c.create_line(ox, y1 - 1, ox + W, y1 - 1, fill=th["sep"])
             tcol, scol = th["text"], th["dim"]
             icol = th["red"] if danger else th["finish"]
         mid = (y0 + y1) / 2
         lx = 20
         if icon:
-            self.icon(icon, 36, mid, icol)
+            self.icon(icon, ox + 36, mid, icol)
             lx = 62
-        c.create_text(lx, mid, anchor="w", text=label, font=f.menu, fill=tcol)
+        c.create_text(ox + lx, mid, anchor="w", text=label, font=f.menu, fill=tcol)
         if sub:
-            c.create_text(W - 20, mid, anchor="e", text=sub, font=f.row, fill=scol)
+            c.create_text(ox + W - 20, mid, anchor="e", text=sub, font=f.row, fill=scol)
+
+    def draw_pager(self, y0):
+        c, th = self.c, self.th
+        c.create_line(0, y0, W, y0, fill=th["sep"])
+        for key, (x0, ya, x1, yb) in self.prects().items():
+            kind, v = key
+            mid = (ya + yb) / 2
+            cx = (x0 + x1) / 2
+            hov = self.hot == key
+            if kind == "page":
+                fill = th["btn_hover"] if hov else th["btn_fill"]
+                edge = th["btn_edge_hover"] if hov else th["btn_edge"]
+                c.create_rectangle(x0, ya, x1, yb, fill=fill, outline=edge)
+                col = th["icon_hover"] if hov else th["icon"]
+                d = -1 if v < 0 else 1
+                c.create_line(cx - 3 * d, mid - 6, cx + 3 * d, mid, cx - 3 * d, mid + 6,
+                              fill=col, width=2, capstyle="round", joinstyle="round")
+            else:
+                active = v == self.page
+                r = 4.5 if active else (4 if hov else 3)
+                col = th["accent"] if active else (th["icon_hover"] if hov else th["btn_edge_hover"])
+                c.create_oval(cx - r, mid - r, cx + r, mid + r, fill=col, outline=col)
 
     def draw_home(self):
         c, th, f = self.c, self.th, self.f
-        self.header("TaskSplit", "DAILY TASK SPLITS", logo=True)
+        title, sub = PAGE_TITLES[self.page]
+        self.header(title, sub, logo=(self.page == 0))
         subs = {
             "continue": self.snap_summary() if self.snap else "no saved run",
             "start": "new run",
@@ -359,12 +490,23 @@ class MainMenu:
             "settings": f"{self.theme_name.title()}  \u2022  {self.size}",
             "quit": "",
         }
-        for i, k in enumerate(ITEMS):
-            self.row(HEADER + i * ROW, LABELS[k], subs[k], self.hot == i,
-                     danger=(k == "quit"), icon=k, disabled=not self.item_enabled(i))
+        # sliding pages: draw every page copy that is (partly) on screen
+        n = len(PAGES)
+        for p in range(n):
+            for k in (-1, 0, 1):
+                ox = (p + k * n - self.pos) * W
+                if not -W < ox < W:
+                    continue
+                for i, name in enumerate(PAGES[p]):
+                    here = (p == self.page and not self.animating)
+                    self.row(HEADER + i * ROW, LABELS[name], subs.get(name, "coming soon"),
+                             here and self.hot == i, danger=(name == "quit"), icon=name,
+                             disabled=(name == "continue" and self.snap is None), ox=ox)
+
+        self.draw_pager(HEADER + BODY_H)
 
         # footer: a live clock, styled like the overlay's timer
-        y0 = HEADER + len(ITEMS) * ROW
+        y0 = HEADER + BODY_H + PAGER_H
         c.create_line(0, y0, W, y0, fill=th["footer_line"])
         now = datetime.datetime.now()
         main, dec = now.strftime("%H:%M"), now.strftime(":%S")

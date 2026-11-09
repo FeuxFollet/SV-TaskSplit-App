@@ -4,7 +4,10 @@ TaskSplit - main menu.   Run this file:   python mainmenu.py
 
 Keep it in the same folder as tsv2.py.
   Continue     -> pick up the run you left off (greyed out if there is none)
-  Start New    -> task editor -> Start -> the speedrun overlay opens
+  Start New    -> pick a mode (Casual / Countdown / Normal) -> set it up -> Start
+                  Casual    just a timer for how long you studied (title only)
+                  Countdown title + time; counts down and stops at 0.00
+                  Normal    task splits
                (right-click the overlay -> "Quit to main menu" saves your run)
   Saved Tasks  -> your library of saved task sets (save from any task editor)
   Settings     -> overlay size + dark / light theme
@@ -555,9 +558,16 @@ class MainMenu:
 
     def snap_summary(self):
         s = self.snap
+        el = float(s.get("elapsed", 0))
+        mode = s.get("mode", "normal")
+        if mode == "casual":
+            return f"casual  \u2022  {ts.fmt(el)}"
+        if mode == "countdown":
+            left = max(0.0, float(s.get("duration", 0)) - el)
+            return "time's up" if left <= 0 else f"{ts.fmt(left)} left"
         n = len(s["tasks"])
         done = min(len(s.get("splits", [])), n)
-        return f"{done}/{n}  \u2022  {ts.fmt(float(s.get('elapsed', 0)))}"
+        return f"{done}/{n}  \u2022  {ts.fmt(el)}"
 
     def act(self, name):
         if self.dialog_alive():
@@ -569,7 +579,7 @@ class MainMenu:
                 self.result = {"snapshot": snap}
                 self.root.quit()
         elif name == "start":
-            self.open_editor(ts.load_data()["last"])
+            self.open_mode_picker()
         elif name == "library":
             self._dialog = ts.LibraryDialog(self.root, self.th, self.f,
                                             on_pick=self.open_editor, action_text="Open")
@@ -583,6 +593,31 @@ class MainMenu:
             self.quit()
         # ph3 / ph4 are placeholders: they do nothing yet
 
+    def open_mode_picker(self):
+        self._dialog = ts.ModeDialog(self.root, self.th, self.f, on_pick=self.pick_mode)
+
+    def pick_mode(self, mode):
+        d = ts.load_data()
+        if mode == "normal":
+            self.open_editor(d["last"])
+            return
+        last = d["last_countdown" if mode == "countdown" else "last_casual"]
+        self._dialog = ts.QuickSetup(
+            self.root, self.th, self.f, mode, last.get("title", ""), last.get("seconds", 1500),
+            on_confirm=lambda title, secs: self.begin_quick(mode, title, secs),
+            on_back=self.open_mode_picker)
+
+    def begin_quick(self, mode, title, seconds):
+        d = ts.load_data()
+        if mode == "countdown":
+            d["last_countdown"] = {"title": title, "seconds": seconds}
+        else:
+            d["last_casual"] = {"title": title}
+        ts.save_data(d)
+        self.result = {"mode": mode, "title": title, "subtitle": "", "tasks": [],
+                       "duration": seconds if mode == "countdown" else 0}
+        self.root.quit()
+
     def open_editor(self, s):
         self._dialog = ts.TaskEditor(
             self.root, self.th, self.f,
@@ -594,7 +629,7 @@ class MainMenu:
         d = ts.load_data()
         d["last"] = {"title": title, "subtitle": subtitle, "tasks": tasks}
         ts.save_data(d)
-        self.result = {"title": title, "subtitle": subtitle, "tasks": tasks}
+        self.result = {"mode": "normal", "title": title, "subtitle": subtitle, "tasks": tasks}
         self.root.quit()
 
     def quit(self):
@@ -1054,7 +1089,9 @@ def main():
         if "snapshot" in res:                       # Continue
             ts.TaskSplit(snapshot=res["snapshot"]).run()
         else:                                       # Start New
-            ts.TaskSplit(res["title"], res["subtitle"], res["tasks"]).run()
+            ts.TaskSplit(res["title"], res["subtitle"], res["tasks"],
+                         mode=res.get("mode", "normal"),
+                         duration=res.get("duration", 0)).run()
         # overlay closed -> loop around and show the main menu again
 
 

@@ -82,6 +82,13 @@ THEMES = {
     },
 }
 
+MODES = ("casual", "countdown", "normal")
+MODE_INFO = {
+    "casual": ("Casual", "Just a timer. Tracks how long you've studied."),
+    "countdown": ("Countdown", "Pick a time. Counts down and stops at 0:00."),
+    "normal": ("Normal", "Task splits. Work through a list of tasks."),
+}
+
 DEFAULT_TASKS = [
     {"name": "Morning routine", "est": 1800},
     {"name": "Study session", "est": 3600},
@@ -156,6 +163,8 @@ def default_data():
         "library": [],      # [{"name", "title", "subtitle", "tasks": [{"name","est"}]}]
         "last": {"title": "Daily Tasks", "subtitle": "Any% Today",
                  "tasks": [dict(t) for t in DEFAULT_TASKS]},
+        "last_casual": {"title": "Study Session"},
+        "last_countdown": {"title": "Focus Session", "seconds": 1500},
         "best": {},         # best segment time per task name
         "pos": None,        # overlay window position
         "snapshot": None,   # run in progress (what the main menu's Continue loads)
@@ -207,11 +216,21 @@ def get_snapshot():
     """The saved run in progress, or None if there isn't a usable one."""
     s = load_data().get("snapshot")
     try:
-        if (isinstance(s, dict) and isinstance(s.get("tasks"), list) and s["tasks"]
-                and all(isinstance(t, dict) and t.get("name") for t in s["tasks"])):
+        if isinstance(s, dict):
             float(s.get("elapsed", 0))
             [float(x) for x in s.get("splits", [])]
-            return s
+            mode = s.get("mode", "normal")
+            if mode == "normal":
+                ok = (isinstance(s.get("tasks"), list) and bool(s["tasks"])
+                      and all(isinstance(t, dict) and t.get("name") for t in s["tasks"]))
+            elif mode == "casual":
+                ok = True
+            elif mode == "countdown":
+                ok = float(s.get("duration", 0)) > 0
+            else:
+                ok = False
+            if ok:
+                return s
     except (TypeError, ValueError):
         pass
     return None
@@ -697,9 +716,217 @@ class LibraryDialog:
         self.on_pick(s)
 
 
+# ---------------------------------------------------------------- new-run dialogs
+class _Dialog:
+    """alive / focus / close shared by the small dialogs."""
+    _closed = False
+
+    def alive(self):
+        if self._closed:
+            return False
+        try:
+            return bool(self.win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def focus(self):
+        try:
+            self.win.deiconify()
+            self.win.lift()
+            self.win.focus_force()
+        except tk.TclError:
+            pass
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
+class ModeDialog(_Dialog):
+    """'Start New' -> pick Casual / Countdown / Normal. on_pick(mode) is called."""
+
+    def __init__(self, root, th, f, on_pick):
+        self.th, self.f, self.on_pick = th, f, on_pick
+        win = self.win = tk.Toplevel(root)
+        win.title("New Run")
+        win.configure(bg=th["ed_bg"])
+        win.attributes("-topmost", True)
+        win.minsize(400, 440)
+        _place_window(win, root, 430, 470)
+        dark_titlebar(win, th["dark"])
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        _header(win, th, f, "New Run", "Choose a mode")
+
+        foot = tk.Frame(win, bg=th["ed_bg"])
+        foot.pack(side="bottom", fill="x", padx=18, pady=16)
+        _button(foot, "Cancel", self.close, th["ed_btn"], th["ed_btn_hover"],
+                th["text"], f).pack(side="right")
+        tk.Label(foot, text="press 1 / 2 / 3", bg=th["ed_bg"], fg=th["ed_muted"],
+                 font=f.lbl).pack(side="left")
+
+        body = tk.Frame(win, bg=th["ed_bg"])
+        body.pack(fill="both", expand=True, padx=18, pady=(16, 0))
+        accents = {"casual": th["green"], "countdown": th["gold"], "normal": th["finish"]}
+        for n, mode in enumerate(MODES, 1):
+            self._card(body, mode, n, accents[mode])
+        win.bind("<Escape>", lambda e: self.close())
+        for n, mode in enumerate(MODES, 1):
+            win.bind(str(n), lambda e, m=mode: self.pick(m))
+        win.after(60, win.focus_force)
+
+    def _card(self, parent, mode, n, accent):
+        th, f = self.th, self.f
+        title, desc = MODE_INFO[mode]
+        card = tk.Frame(parent, bg=th["ed_panel"], highlightthickness=1,
+                        highlightbackground=th["ed_edge"], cursor="hand2")
+        card.pack(fill="x", pady=(0, 10))
+        strip = tk.Frame(card, bg=accent, width=5)
+        strip.pack(side="left", fill="y")
+        inner = tk.Frame(card, bg=th["ed_panel"])
+        inner.pack(side="left", fill="both", expand=True, padx=14, pady=14)
+        t = tk.Label(inner, text=title, bg=th["ed_panel"], fg=th["text"], font=f.menu,
+                     anchor="w")
+        t.pack(anchor="w")
+        d = tk.Label(inner, text=desc, bg=th["ed_panel"], fg=th["dim"], font=f.lbl,
+                     anchor="w", justify="left", wraplength=300)
+        d.pack(anchor="w", pady=(3, 0))
+        k = tk.Label(card, text=str(n), bg=th["ed_panel"], fg=th["ed_muted"], font=f.rowb,
+                     padx=14)
+        k.pack(side="right")
+        paint = [card, inner, t, d, k]
+
+        def hover(on):
+            bg = th["ed_panel_hover"] if on else th["ed_panel"]
+            for w in paint:
+                w.config(bg=bg)
+            card.config(highlightbackground=accent if on else th["ed_edge"])
+
+        for w in paint + [strip]:
+            w.bind("<Enter>", lambda e: hover(True))
+            w.bind("<Leave>", lambda e: hover(False))
+            w.bind("<Button-1>", lambda e, m=mode: self.pick(m))
+
+    def pick(self, mode):
+        self.close()
+        self.on_pick(mode)
+
+
+class QuickSetup(_Dialog):
+    """Casual: just a title.  Countdown: a title + a time.
+    on_confirm(title, seconds) / on_back() are called."""
+
+    PRESETS = (15, 25, 45, 60, 90)          # minutes, countdown quick-pick chips
+
+    def __init__(self, root, th, f, mode, title, seconds, on_confirm, on_back):
+        self.mode, self.th, self.f = mode, th, f
+        self.on_confirm, self.on_back = on_confirm, on_back
+        self._job = None
+        cd = mode == "countdown"
+        win = self.win = tk.Toplevel(root)
+        win.title(MODE_INFO[mode][0])
+        win.configure(bg=th["ed_bg"])
+        win.attributes("-topmost", True)
+        win.minsize(400, 400 if cd else 300)
+        _place_window(win, root, 430, 440 if cd else 330)
+        dark_titlebar(win, th["dark"])
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        _header(win, th, f, MODE_INFO[mode][0],
+                "Name it and set the time" if cd else "Name your study session")
+
+        foot = tk.Frame(win, bg=th["ed_bg"])
+        foot.pack(side="bottom", fill="x", padx=18, pady=16)
+        _button(foot, "Start", self.confirm, th["accent"], th["accent_hover"],
+                th["accent_text"], f).pack(side="right")
+        _button(foot, "Back", self.back, th["ed_btn"], th["ed_btn_hover"],
+                th["text"], f).pack(side="right", padx=(0, 8))
+        self.status = tk.Label(foot, text="", bg=th["ed_bg"], fg=th["red"], font=f.lbl)
+        self.status.pack(side="left")
+
+        body = tk.Frame(win, bg=th["ed_bg"])
+        body.pack(fill="both", expand=True, padx=18, pady=(18, 0))
+        self.title_var = tk.StringVar(value=title)
+        _caption(body, "TITLE", th, f).pack(anchor="w")
+        te = _entry(body, self.title_var, th, f)
+        te.pack(fill="x", ipady=6, pady=(3, 18))
+        te.bind("<Return>", lambda e: self.confirm())
+        self.vars = None
+        if cd:
+            _caption(body, "TIME", th, f).pack(anchor="w")
+            row = tk.Frame(body, bg=th["ed_bg"])
+            row.pack(anchor="w", pady=(4, 10))
+            seconds = int(seconds or 0)
+            self.vars = {"h": tk.StringVar(value=str(seconds // 3600)),
+                         "m": tk.StringVar(value=str(seconds % 3600 // 60)),
+                         "s": tk.StringVar(value=str(seconds % 60))}
+            for key in "hms":
+                e = _entry(row, self.vars[key], th, f, width=4, justify="center")
+                e.pack(side="left", ipady=6)
+                e.bind("<Return>", lambda ev: self.confirm())
+                tk.Label(row, text=key, bg=th["ed_bg"], fg=th["dim"], font=f.row).pack(
+                    side="left", padx=(4, 14))
+            chips = tk.Frame(body, bg=th["ed_bg"])
+            chips.pack(anchor="w")
+            for m in self.PRESETS:
+                lbl = f"{m // 60}h" if m % 60 == 0 else (f"{m // 60}h{m % 60}" if m > 60 else f"{m}m")
+                _button(chips, lbl, lambda m=m: self.set_minutes(m), th["ed_btn"],
+                        th["ed_btn_hover"], th["text"], f, padx=10, pady=4).pack(
+                    side="left", padx=(0, 6))
+        win.bind("<Escape>", lambda e: self.close())
+        win.after(60, lambda: (win.focus_force(), te.focus_set(), te.select_range(0, "end")))
+
+    def set_minutes(self, m):
+        self.vars["h"].set(str(m // 60))
+        self.vars["m"].set(str(m % 60))
+        self.vars["s"].set("0")
+
+    def flash(self, text):
+        self.status.config(text=text)
+        if self._job:
+            try:
+                self.win.after_cancel(self._job)
+            except tk.TclError:
+                pass
+        self._job = self.win.after(2800, lambda: None if self._closed else
+                                   self.status.config(text=""))
+
+    def total_seconds(self):
+        """Seconds from the h/m/s boxes, or None if they aren't valid numbers."""
+        try:
+            h, m, sec = (int(self.vars[k].get().strip() or 0) for k in "hms")
+        except ValueError:
+            return None
+        if min(h, m, sec) < 0:
+            return None
+        return min(h * 3600 + m * 60 + sec, 99 * 3600 + 59 * 60 + 59)
+
+    def confirm(self):
+        title = self.title_var.get().strip() or ("Focus Session" if self.vars else "Study Session")
+        secs = 0
+        if self.vars:
+            secs = self.total_seconds()
+            if secs is None:
+                self.flash("Time must be whole numbers")
+                return
+            if secs <= 0:
+                self.flash("Set a time above 0")
+                return
+        self.close()
+        self.on_confirm(title, secs)
+
+    def back(self):
+        self.close()
+        self.on_back()
+
+
 # ---------------------------------------------------------------- overlay
 class TaskSplit:
-    def __init__(self, title="Daily Tasks", subtitle="", tasks=None, snapshot=None):
+    def __init__(self, title="Daily Tasks", subtitle="", tasks=None, snapshot=None,
+                 mode="normal", duration=0):
         d = load_data()
         st = d["settings"]
         self.th = THEMES[st["theme"]]
@@ -712,8 +939,13 @@ class TaskSplit:
         self.title = title or "Daily Tasks"
         self.subtitle = subtitle or ""
         self.tasks = [dict(t) for t in (DEFAULT_TASKS if tasks is None else tasks)]
+        self.mode = mode if mode in MODES else "normal"
+        self.duration = float(duration or 0)        # countdown length in seconds
+        if self.mode != "normal":
+            self.tasks = []
         self.splits, self.golds = [], []
         self.acc, self.t0 = 0.0, None
+        self._bell_done = False
         self._cleared = False            # set by Reset: lets save() drop the snapshot
         self._last_autosave = time.monotonic()
         if snapshot:
@@ -761,7 +993,8 @@ class TaskSplit:
 
     # ------------------------------------------------------------ state
     def snapshot(self):
-        return {"title": self.title, "subtitle": self.subtitle,
+        return {"mode": self.mode, "duration": self.duration,
+                "title": self.title, "subtitle": self.subtitle,
                 "tasks": self.tasks, "splits": self.splits, "golds": self.golds,
                 "elapsed": self.elapsed(), "best_before": self._best_before,
                 "saved_at": datetime.datetime.now().isoformat(timespec="seconds")}
@@ -770,7 +1003,10 @@ class TaskSplit:
         """Load a snapshot. The clock comes back PAUSED at the saved time."""
         self.title = s.get("title") or "Daily Tasks"
         self.subtitle = s.get("subtitle") or ""
-        self.tasks = [dict(t) for t in s["tasks"]]
+        m = s.get("mode", "normal")
+        self.mode = m if m in MODES else "normal"
+        self.duration = float(s.get("duration", 0) or 0)
+        self.tasks = [dict(t) for t in s.get("tasks", [])] if self.mode == "normal" else []
         self.splits = [float(x) for x in s.get("splits", [])][:len(self.tasks)]
         g = [bool(x) for x in s.get("golds", [])][:len(self.splits)]
         self.golds = g + [False] * (len(self.splits) - len(g))
@@ -778,6 +1014,9 @@ class TaskSplit:
         self.t0 = None
         bb = s.get("best_before")
         self._best_before = dict(bb) if isinstance(bb, dict) else None
+        if self.mode == "countdown" and self.duration > 0:
+            self.acc = min(self.acc, self.duration)
+        self._bell_done = self.finished             # don't ring again for a finished run
 
     def save(self):
         """Read-modify-write so we never clobber the library / settings.
@@ -796,7 +1035,10 @@ class TaskSplit:
             pass
 
     def elapsed(self):
-        return self.acc + (time.monotonic() - self.t0 if self.t0 else 0.0)
+        raw = self.acc + (time.monotonic() - self.t0 if self.t0 else 0.0)
+        if self.mode == "countdown" and self.duration > 0:
+            return min(raw, self.duration)
+        return raw
 
     @property
     def started(self):
@@ -804,6 +1046,10 @@ class TaskSplit:
 
     @property
     def finished(self):
+        if self.mode == "casual":
+            return False
+        if self.mode == "countdown":
+            return self.duration > 0 and self.elapsed() >= self.duration - 1e-9
         return bool(self.tasks) and len(self.splits) >= len(self.tasks)
 
     @property
@@ -819,7 +1065,7 @@ class TaskSplit:
 
     # ------------------------------------------------------------ actions
     def split(self):
-        if not self.tasks or not self.running or self.finished:
+        if self.mode != "normal" or not self.tasks or not self.running or self.finished:
             return
         cum = self.elapsed()
         prev = self.splits[-1] if self.splits else 0.0
@@ -858,13 +1104,14 @@ class TaskSplit:
         if self.running:
             self.acc += time.monotonic() - self.t0
             self.t0 = None
-        elif not self.finished and self.tasks:
+        elif not self.finished and (self.tasks or self.mode != "normal"):
             self.t0 = time.monotonic()  # start, or resume after stop
         self.save()
 
     def reset(self):
         self.splits, self.golds, self.acc, self.t0 = [], [], 0.0, None
         self._best_before = None
+        self._bell_done = False
         self._cleared = True
         self.save()
 
@@ -882,6 +1129,8 @@ class TaskSplit:
 
     # ------------------------------------------------------------ window
     def n_rows(self):
+        if self.mode != "normal":
+            return 0                    # casual / countdown: just header + big timer
         return max(1, min(len(self.tasks), MAX_ROWS))
 
     def height(self):
@@ -904,7 +1153,8 @@ class TaskSplit:
         fy = self.height() - FOOT_H
         y0 = fy + 11
         rects = {}
-        for k, name in enumerate(("undo", "reset", "split")):
+        names = ("undo", "reset", "split") if self.mode == "normal" else ("reset",)
+        for k, name in enumerate(names):
             x0 = 12 + k * (BTN + BTN_GAP)
             rects[name] = (x0, y0, x0 + BTN, y0 + BTN)
         return rects
@@ -975,13 +1225,17 @@ class TaskSplit:
 
     # ------------------------------------------------------------ menu
     def build_menu(self):
+        normal = self.mode == "normal"
         m = tk.Menu(self.root, tearoff=0)
-        m.add_command(label="Split (next task)", command=self.split)
+        if normal:
+            m.add_command(label="Split (next task)", command=self.split)
         m.add_command(label="Start / Stop timer", command=self.pause)
-        m.add_command(label="Undo split", command=self.undo)
+        if normal:
+            m.add_command(label="Undo split", command=self.undo)
         m.add_command(label="Reset run", command=self.reset)
         m.add_separator()
-        m.add_command(label="Edit tasks…", command=self.edit_tasks)
+        if normal:
+            m.add_command(label="Edit tasks\u2026", command=self.edit_tasks)
         om = tk.Menu(m, tearoff=0)
         self.op_var = tk.IntVar(value=int(round(self.opacity * 100)))
         for pct in (40, 55, 70, 85, 100):
@@ -1062,11 +1316,15 @@ class TaskSplit:
             sub += "  •  " + self.subtitle
         c.create_text(12, 34, anchor="w", font=f.sub, fill=th["dim"],
                       text=self.fit(sub, f.sub, W - 24))
-        c.create_text(W - 12, 24, anchor="e", text=f"{min(cur, n)}/{n}", font=f.title,
-                      fill=th["finish"] if self.finished else th["text"])
+        if self.mode == "normal":
+            c.create_text(W - 12, 24, anchor="e", text=f"{min(cur, n)}/{n}", font=f.title,
+                          fill=th["finish"] if self.finished else th["text"])
+        else:
+            c.create_text(W - 12, 22, anchor="e", text=self.mode.upper(), font=f.sub,
+                          fill=th["finish"] if self.finished else th["dim"])
 
         # rows
-        if n == 0:
+        if n == 0 and self.mode == "normal":
             c.create_text(W / 2, HEADER_H + ROW_H / 2, text="Right-click → Edit tasks",
                           font=f.row, fill=th["dim"])
         start = 0
@@ -1123,16 +1381,22 @@ class TaskSplit:
         # footer
         fy = total_h - FOOT_H
         c.create_line(0, fy, W, fy, fill=th["footer_line"])
+        rem = max(0.0, self.duration - el) if self.mode == "countdown" else 0.0
         if self.finished:
             col = th["finish"]
         elif not self.running:
             col = th["paused"]
+        elif self.mode == "casual":
+            col = th["green"]
+        elif self.mode == "countdown":
+            col = th["red"] if rem <= 10 else th["green"]
         else:
             planned = sum((self.tasks[i].get("est") or 0) for i in range(min(cur + 1, n)))
             col = th["green"] if (planned == 0 or el <= planned) else th["red"]
 
-        cs = int((el - int(el)) * 100)
-        main = fmt(el)
+        shown = rem if self.mode == "countdown" else el     # countdown shows time LEFT
+        cs = int((shown - int(shown)) * 100)
+        main = fmt(shown)
         dec = f".{cs:02d}"
         right = W - 12
         base_y = fy + 42
@@ -1141,8 +1405,9 @@ class TaskSplit:
                       text=main, font=f.big, fill=col)
 
         armed = time.monotonic() < self.reset_armed
+        done_txt = "Time's up!" if self.mode == "countdown" else "Done!"
         label = "Not started" if not self.started else (
-            "Done!" if self.finished else ("Running" if self.running else "Paused"))
+            done_txt if self.finished else ("Running" if self.running else "Paused"))
         hints = {"undo": "Undo", "reset": "Reset run", "split": "Next task",
                  "timer": "Stop" if self.running else ("Resume" if self.started else "Start")}
         lbl_col = th["dim"]
@@ -1151,7 +1416,7 @@ class TaskSplit:
         elif self.hover in hints and not (self.hover == "timer" and self.finished):
             label = hints[self.hover]
         c.create_text(12, fy + 58, anchor="w", text=label.upper(), font=f.lbl, fill=lbl_col)
-        if self.started and not self.finished:
+        if self.mode == "normal" and self.started and not self.finished:
             sg = self.seg_elapsed()
             sc = int((sg - int(sg)) * 100)
             c.create_text(right, fy + 72, anchor="e", text=f"{fmt(sg)}.{sc:02d}",
@@ -1161,6 +1426,12 @@ class TaskSplit:
         elif not self.started:
             c.create_text(right, fy + 72, anchor="e", text="click timer to start",
                           font=f.lbl, fill=th["dim"])
+
+        elif self.mode == "countdown" and self.started:
+            ec = int((el - int(el)) * 100)
+            c.create_text(right, fy + 72, anchor="e", text=f"{fmt(el)}.{ec:02d}",
+                          font=f.seg, fill=th["text"])
+            c.create_text(12, fy + 72, anchor="w", text="ELAPSED", font=f.lbl, fill=th["dim"])
 
         # small, subtle icon buttons
         for name, (x0, y0, x1, y1) in self.button_rects().items():
@@ -1188,7 +1459,7 @@ class TaskSplit:
         for k in range(19):
             t = math.radians(t0 + (t1 - t0) * k / 18)
             pts += [cx + r * math.cos(t), cy - r * math.sin(t)]
-        self.canvas.create_line(pts, fill=col, width=2 * self.s, smooth=True)
+        self.canvas.create_line(*pts, fill=col, width=2 * self.s, smooth=True)
         t = math.radians(t1)
         ex, ey = cx + r * math.cos(t), cy - r * math.sin(t)
         tx, ty = -math.sin(t), -math.cos(t)  # direction of travel
@@ -1220,6 +1491,15 @@ class TaskSplit:
                 getattr(self, self.q.get_nowait())()
         except queue.Empty:
             pass
+        if self.mode == "countdown" and self.running and self.finished:
+            self.acc, self.t0 = self.duration, None          # freeze at 0.00
+            if not self._bell_done:
+                self._bell_done = True
+                try:
+                    self.root.bell()
+                except Exception:
+                    pass
+            self.save()
         self.draw()
         if self.running and time.monotonic() - self._last_autosave > 5:
             self._last_autosave = time.monotonic()

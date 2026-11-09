@@ -9,6 +9,9 @@ Keep it in the same folder as tsv2.py.
   Saved Tasks  -> your library of saved task sets (save from any task editor)
   Settings     -> overlay size + dark / light theme
   AFK (page 2) -> pick a reason, an image pops up in the middle of your screen
+
+The menu is a real window: it shows on the taskbar and has its own custom
+minimize / close buttons in the top-right corner (no maximize - it can't resize).
   Quit         -> close the app
 """
 import datetime
@@ -64,8 +67,16 @@ AFK_PROMPTS = [
     ("Quick Nap",             "nap",          False),
     ("Be Right Back",         "brb",          True),
 ]
-AFK_SCREEN_FRACTION = 0.7   # image fits inside this fraction of the screen (0.5 = 50%)
+AFK_SCREEN_FRACTION = 0.5   # image fits inside this fraction of the screen (0.5 = 50%)
 AFK_UPSCALE = True          # True = small images are enlarged to reach that size
+# ===================================================================
+
+# ===================================================================
+#  WINDOW SETTINGS
+# ===================================================================
+MENU_ALWAYS_ON_TOP = False  # True = menu floats above every other window
+WIN_BTN_W, WIN_BTN_H = 40, 28   # size of the custom minimize / close buttons
+# Optional taskbar icon: put  icon.ico  (Windows) and/or  icon.png  in  resources/
 # ===================================================================
 
 HEADER = 80
@@ -147,6 +158,21 @@ def pick_image(base, randomize, last=None):
     return imgs[0]
 
 
+def detach_owner(win):
+    """Windows only: make a popup independent of the main window, so it stays visible
+    when the main window is minimized. Harmless no-op elsewhere."""
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        f = ctypes.windll.user32.SetWindowLongPtrW
+        f.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        f.restype = ctypes.c_void_p
+        f(hwnd, -8, None)                       # GWLP_HWNDPARENT -> no owner
+    except Exception:
+        pass
+
+
 def prompt_info(i):
     """(label, file base name, randomize?) for AFK_PROMPTS[i]; RANDOM defaults to False."""
     p = AFK_PROMPTS[i]
@@ -210,9 +236,12 @@ class MainMenu:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("TaskSplit")
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
+        self.root.overrideredirect(True)        # we draw our own title buttons
+        self.root.attributes("-topmost", MENU_ALWAYS_ON_TOP)
         self.f = ts.make_fonts(1.0)
+        self.set_icon()
+        self._redirect_pending = False
+        self.root.bind("<Map>", self.on_map)
 
         self.reload()
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
@@ -313,6 +342,85 @@ class MainMenu:
         """i = row index on the CURRENT page."""
         return self.page_items()[i] != "continue" or self.snap is not None
 
+    # ---- real-window behaviour (taskbar, minimize, close)
+    def set_icon(self):
+        for fn, kind in (("icon.ico", "ico"), ("icon.png", "png")):
+            path = resource(os.path.join(LOGO_DIR, fn))
+            if os.path.exists(path):
+                try:
+                    if kind == "ico":
+                        self.root.iconbitmap(path)
+                    else:
+                        self._icon = tk.PhotoImage(file=path)
+                        self.root.iconphoto(True, self._icon)
+                    return
+                except tk.TclError:
+                    pass
+
+    def _hwnd(self):
+        import ctypes
+        return ctypes.windll.user32.GetParent(self.root.winfo_id())
+
+    def setup_taskbar(self):
+        """Windows: frameless windows are hidden from the taskbar by default.
+        Flip the style bits so ours gets a taskbar button (and Alt-Tab entry)."""
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            import ctypes
+            self.root.update_idletasks()
+            u = ctypes.windll.user32
+            hwnd = self._hwnd()
+            style = u.GetWindowLongW(hwnd, -20)             # GWL_EXSTYLE
+            style = (style & ~0x00000080) | 0x00040000      # - TOOLWINDOW, + APPWINDOW
+            u.SetWindowLongW(hwnd, -20, style)
+            self.root.withdraw()                            # re-show so Windows notices
+            self.root.after(20, self.root.deiconify)
+        except Exception:
+            pass
+
+    def minimize(self):
+        if sys.platform.startswith("win"):
+            try:
+                import ctypes
+                ctypes.windll.user32.ShowWindow(self._hwnd(), 6)    # SW_MINIMIZE
+                return
+            except Exception:
+                pass
+        # other systems can't minimize a frameless window: briefly give it a frame
+        self._redirect_pending = True
+        self.root.overrideredirect(False)
+        self.root.iconify()
+
+    def on_map(self, e):
+        if e.widget is self.root and self._redirect_pending:
+            self._redirect_pending = False
+            self.root.after(30, lambda: self.root.overrideredirect(True))
+
+    def wrects(self):
+        """Custom title buttons, flush in the top-right corner."""
+        w, h = WIN_BTN_W, WIN_BTN_H
+        return {("win", "min"): (W - 2 * w - 1, 1, W - w - 1, 1 + h),
+                ("win", "close"): (W - w - 1, 1, W - 1, 1 + h)}
+
+    def draw_winbtns(self):
+        c, th = self.c, self.th
+        for key, (x0, y0, x1, y1) in self.wrects().items():
+            hov = self.hot == key
+            is_close = key[1] == "close"
+            if hov:
+                c.create_rectangle(x0, y0, x1, y1, outline="",
+                                   fill="#c0392b" if is_close else th["btn_hover"])
+                col = "#ffffff" if is_close else th["text"]
+            else:
+                col = th["dim"]
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            if is_close:
+                c.create_line(cx - 5, cy - 5, cx + 5, cy + 5, fill=col, width=1.5)
+                c.create_line(cx - 5, cy + 5, cx + 5, cy - 5, fill=col, width=1.5)
+            else:
+                c.create_line(cx - 5, cy + 3, cx + 5, cy + 3, fill=col, width=1.5)
+
     # ---- AFK
     def afk_max(self):
         return max(0, len(AFK_PROMPTS) * ROW - (H - ROW - HEADER))
@@ -397,6 +505,7 @@ class MainMenu:
         win.bind("<Escape>", self.close_afk)
         win.bind("<Key>", self.close_afk)
         self._afk_win = win
+        detach_owner(win)           # stays up even if the menu is minimized
         win.after(50, win.focus_force)
 
     # ---- page sliding
@@ -500,6 +609,12 @@ class MainMenu:
         self.apply_theme()
 
     def activate(self, key):
+        if isinstance(key, tuple) and key[0] == "win":
+            if key[1] == "min":
+                self.minimize()
+            else:
+                self.quit()
+            return
         if self.view == "home":
             if isinstance(key, tuple):
                 if key[0] == "page":
@@ -549,6 +664,10 @@ class MainMenu:
         return r
 
     def hit(self, x, y):
+        if y < 1 + WIN_BTN_H:
+            for key, (x0, y0, x1, y1) in self.wrects().items():
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    return key
         if self.view == "home":
             if self.animating:
                 return None
@@ -903,6 +1022,7 @@ class MainMenu:
             self.draw_afk()
         else:
             self.draw_settings()
+        self.draw_winbtns()
         c.create_rectangle(0, 0, W - 1, H - 1, outline=self.th["edge"])
 
     # ------------------------------------------------------------ loop
@@ -916,7 +1036,8 @@ class MainMenu:
 
     def run(self):
         self.tick()
-        self.root.after(100, self.root.focus_force)
+        self.root.after(30, self.setup_taskbar)
+        self.root.after(150, self.root.focus_force)
         self.root.mainloop()
         try:
             self.root.destroy()
